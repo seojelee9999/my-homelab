@@ -1,0 +1,31 @@
+---
+- name: Debian | Include apt codename generation tasks
+  ansible.builtin.include_tasks:
+    file: apt-codename.yml
+
+- name: Debian | Apt Dependencies
+  become: true
+  ansible.builtin.apt:
+    name: "{{ tailscale_apt_dependencies }}"
+    cache_valid_time: 3600
+    state: present
+
+- name: Debian | Remove Tailscale
+  become: true
+  ansible.builtin.apt:
+    name: "{{ tailscale_package }}"
+    state: absent
+
+- name: Debian | Remove Tailscale Repository
+  become: true
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    types:
+      - deb
+    uris: https://pkgs.tailscale.com/{{ release_stability | lower }}/{{ tailscale_debian_distro[ansible_facts.distribution | lower] }}
+    suites:
+      - "{{ ansible_facts.distribution_release }}"
+    components:
+      - main
+    signed_by: "{{ tailscale_apt_signkey }}"
+    state: absent

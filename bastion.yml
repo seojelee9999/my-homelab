@@ -1,0 +1,19 @@
+---
+- hosts: subnet-router
+  become: true
+
+  collections:
+    - artis3n.tailscale
+
+  vars:
+    # 환경 변수 대신 키 문자열 직접 명시
+    tailscale_authkey: "tskey-auth-kbz1z5jUTF11CNTRL-rgxtrwGm9iDTUqoHMsNxhDm7AK4Xomvw"
+    
+    # Subnet Router 설정
+    tailscale_sysctl:
+      net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
+    tailscale_args: "--advertise-routes=192.168.55.0/24"
+
+  roles:
+    - role: artis3n.tailscale.machine

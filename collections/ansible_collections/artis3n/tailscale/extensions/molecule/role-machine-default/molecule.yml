@@ -1,0 +1,4 @@
+---
+# Common Molecule configuration is located at <project root>/.config/molecule/config.yml
+scenario:
+  name: role-machine-default

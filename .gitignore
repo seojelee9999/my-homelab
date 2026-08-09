@@ -1,0 +1,35 @@
+# Ansible runtime files
+*.retry
+.ansible/
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*vault-password*
+*vault_password*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+kubeconfig
+admin.conf
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

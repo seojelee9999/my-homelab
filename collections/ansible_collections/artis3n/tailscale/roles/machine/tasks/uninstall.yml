@@ -1,0 +1,60 @@
+---
+- name: Uninstall | Check If Tailscale Is Connected
+  ansible.builtin.command: tailscale status
+  changed_when: false
+  failed_when: false
+  register: tailscale_status
+
+- name: Uninstall | De-register Tailscale Node
+  become: true
+  # Hack to get correct changed/ok status
+  ansible.builtin.shell: tailscale status; tailscale logout
+  register: tailscale_logout
+  changed_when: "'Logged out.' not in tailscale_status.stdout and 'not logged in' not in tailscale_status.stdout"
+  when:
+    # [Errno 2] No such file or directory: 'tailscale'
+    - tailscale_status.rc != 2
+    # "bash: tailscale: command not found"
+    - tailscale_status.rc != 127
+
+- name: Uninstall | Determine state folder
+  ansible.builtin.set_fact:
+    # Following https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+    tailscale_state_folder: "{{ ansible_facts.env.XDG_STATE_HOME | default(ansible_facts.env.HOME + '/.local/state') }}"
+
+- name: Uninstall | Delete Tailscale State
+  ansible.builtin.file:
+    path: "{{ tailscale_state_folder }}/artis3n-tailscale"
+    state: absent
+
+- name: Uninstall | Gather Service Facts
+  ansible.builtin.service_facts:
+
+- name: Uninstall | Disable Tailscale Service
+  become: true
+  ansible.builtin.service:
+    name: "{{ tailscale_service }}"
+    state: stopped
+    enabled: false
+  when: tailscale_service in ansible_facts.services
+
+- name: Uninstall | Determine distribution family
+  ansible.builtin.include_tasks: determine_distro_family.yml
+  when: "not tailscale_manage_binaries_skip"
+
+- name: Uninstall | Tailscale binaries
+  ansible.builtin.include_tasks: "{{ tailscale_distro_family }}/uninstall.yml"
+  when: "not tailscale_manage_binaries_skip"
+
+- name: Uninstall | Remove Tailscale daemon state and logs
+  become: true
+  ansible.builtin.file:
+    path: "/var/lib/tailscale"
+    state: absent
+  when: "not tailscale_manage_binaries_skip"
+
+- name: Uninstall | Remove tailscaled config
+  become: true
+  ansible.builtin.file:
+    path: /etc/default/tailscaled
+    state: absent

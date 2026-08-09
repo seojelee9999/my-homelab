@@ -1,0 +1,35 @@
+{
+ "collection_info": {
+  "namespace": "artis3n",
+  "name": "tailscale",
+  "version": "1.2.1",
+  "authors": [
+   "Ari Kalfus <dev@artis3nal.com>"
+  ],
+  "readme": "README.md",
+  "tags": [
+   "ansible",
+   "networking",
+   "tailscale",
+   "vpn"
+  ],
+  "description": "This collection provides a series of roles, plugins, and modules to manage your Tailscale Tailnet and Tailscale devices on Linux systems.",
+  "license": [],
+  "license_file": "LICENSE",
+  "dependencies": {
+   "community.general": ">=10.3.0"
+  },
+  "repository": "https://github.com/artis3n/ansible-collection-tailscale",
+  "documentation": "https://github.com/artis3n/ansible-collection-tailscale",
+  "homepage": "https://galaxy.ansible.com/ui/repo/published/artis3n/tailscale/",
+  "issues": "https://github.com/artis3n/ansible-collection-tailscale/issues"
+ },
+ "file_manifest_file": {
+  "name": "FILES.json",
+  "ftype": "file",
+  "chksum_type": "sha256",
+  "chksum_sha256": "88e58ae27c7344ded761eb7a9015d427805dae75c52e2068be324811879eade6",
+  "format": 1
+ },
+ "format": 1
+}

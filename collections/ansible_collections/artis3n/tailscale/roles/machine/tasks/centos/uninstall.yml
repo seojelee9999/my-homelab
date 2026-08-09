@@ -1,0 +1,12 @@
+---
+- name: CentOS | Remove Tailscale
+  become: true
+  ansible.builtin.dnf:
+    name: "{{ tailscale_package }}"
+    state: absent
+
+- name: CentOS | Remove Tailscale Repo
+  become: true
+  ansible.builtin.file:
+    path: /etc/yum.repos.d/tailscale.repo
+    state: absent

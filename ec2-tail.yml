@@ -1,0 +1,13 @@
+---
+- hosts: ec2-nodes  # 인벤토리에 지정할 대상 EC2 그룹명
+  become: true
+
+  collections:
+    - artis3n.tailscale
+
+  vars:
+    # bastion.yml에서 사용했던 그 암호화된 Auth Key 그대로 사용
+    tailscale_authkey: "tskey-auth-kbz1z5jUTF11CNTRL-rgxtrwGm9iDTUqoHMsNxhDm7AK4Xomvw"
+
+  roles:
+    - role: artis3n.tailscale.machine

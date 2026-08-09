@@ -1,0 +1,128 @@
+---
+- name: Install ingress-nginx controller
+  hosts: kube_control_plane
+  become: true
+  gather_facts: false
+
+  vars:
+    ingress_nginx_release_name: ingress-nginx
+    ingress_nginx_namespace: ingress-nginx
+    ingress_nginx_repo_name: ingress-nginx
+    ingress_nginx_repo_url: https://kubernetes.github.io/ingress-nginx
+    ingress_nginx_chart: ingress-nginx/ingress-nginx
+    # Bare-metal clusters normally use NodePort. Override with LoadBalancer
+    # when the cluster has a cloud load balancer implementation.
+    ingress_nginx_service_type: NodePort
+    ingress_nginx_kubeconfig: /etc/kubernetes/admin.conf
+    ingress_nginx_wait_timeout: 10m
+    # Set this with -e ingress_nginx_chart_version=x.y.z to pin a version.
+    ingress_nginx_chart_version: ""
+
+  tasks:
+    - name: Check that the Kubernetes admin kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ ingress_nginx_kubeconfig }}"
+      register: ingress_nginx_kubeconfig_stat
+
+    - name: Stop when the Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - ingress_nginx_kubeconfig_stat.stat.exists
+        fail_msg: >-
+          {{ ingress_nginx_kubeconfig }} does not exist. Initialize the
+          Kubernetes control plane before installing ingress-nginx.
+
+    - name: Check that Helm is installed
+      ansible.builtin.command:
+        argv:
+          - helm
+          - version
+          - --short
+      register: ingress_nginx_helm_version
+      changed_when: false
+      failed_when: false
+
+    - name: Stop when Helm is not installed
+      ansible.builtin.assert:
+        that:
+          - ingress_nginx_helm_version.rc == 0
+        fail_msg: "Helm is required. Run 'ansible-playbook helm.yml' first."
+
+    - name: Add or update the ingress-nginx Helm repository
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ ingress_nginx_repo_name }}"
+          - "{{ ingress_nginx_repo_url }}"
+          - --force-update
+      register: ingress_nginx_repo_add
+      changed_when: "'has been added' in ingress_nginx_repo_add.stdout"
+
+    - name: Update Helm repository metadata
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - update
+          - "{{ ingress_nginx_repo_name }}"
+      changed_when: false
+
+    - name: Install or upgrade ingress-nginx
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'helm', 'upgrade', '--install', ingress_nginx_release_name,
+              ingress_nginx_chart,
+              '--namespace', ingress_nginx_namespace,
+              '--create-namespace',
+              '--set', 'controller.service.type=' + ingress_nginx_service_type,
+              '--wait', '--timeout', ingress_nginx_wait_timeout
+            ]
+            + (
+              ['--version', ingress_nginx_chart_version]
+              if ingress_nginx_chart_version | length > 0
+              else []
+            )
+          }}
+      environment:
+        KUBECONFIG: "{{ ingress_nginx_kubeconfig }}"
+      register: ingress_nginx_install
+      changed_when: >-
+        'has been upgraded' in ingress_nginx_install.stdout or
+        'has been installed' in ingress_nginx_install.stdout
+
+    - name: Verify ingress controller rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ ingress_nginx_kubeconfig }}"
+          - rollout
+          - status
+          - deployment/ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_namespace }}"
+          - "--timeout={{ ingress_nginx_wait_timeout }}"
+      changed_when: false
+
+    - name: Read ingress controller service information
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ ingress_nginx_kubeconfig }}"
+          - get
+          - service
+          - ingress-nginx-controller
+          - --namespace
+          - "{{ ingress_nginx_namespace }}"
+          - --output=wide
+      register: ingress_nginx_service
+      changed_when: false
+
+    - name: Show ingress controller service
+      ansible.builtin.debug:
+        var: ingress_nginx_service.stdout_lines

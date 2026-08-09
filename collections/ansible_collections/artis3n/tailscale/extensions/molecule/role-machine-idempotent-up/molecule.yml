@@ -1,0 +1,20 @@
+---
+# Common Molecule configuration is located at <project root>/.config/molecule/config.yml
+provisioner:
+  playbooks:
+    prepare: ../role-machine-default/prepare.yml
+    verify: ../role-machine-default/verify.yml
+    cleanup: ../role-machine-default/cleanup.yml
+
+scenario:
+  name: role-machine-idempotent-up
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - verify
+    - cleanup
+    - destroy

@@ -1,0 +1,17 @@
+---
+# Common Molecule configuration is located at <project root>/.config/molecule/config.yml
+provisioner:
+  playbooks:
+    prepare: ../role-machine-default/prepare.yml
+
+scenario:
+  name: role-machine-state-absent
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - verify
+    - destroy

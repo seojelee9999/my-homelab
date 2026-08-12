@@ -1,0 +1,71 @@
+---
+- name: Register a GitHub repository in Argo CD
+  hosts: kube_control_plane[0]
+  become: true
+  gather_facts: false
+
+  vars:
+    argocd_namespace: argocd
+    argocd_kubeconfig: /etc/kubernetes/admin.conf
+    argocd_repository_name: github-repository
+    argocd_repository_url: ""
+    argocd_repository_private: false
+    argocd_github_username: "{{ lookup('ansible.builtin.env', 'ARGOCD_GITHUB_USERNAME') }}"
+    argocd_github_token: "{{ lookup('ansible.builtin.env', 'ARGOCD_GITHUB_TOKEN') }}"
+    argocd_repository_manifest: /tmp/argocd-github-repository.yml
+
+  tasks:
+    - name: Validate repository settings
+      ansible.builtin.assert:
+        that:
+          - argocd_repository_url | length > 0
+          - not (argocd_repository_private | bool) or argocd_github_username | length > 0
+          - not (argocd_repository_private | bool) or argocd_github_token | length > 0
+        fail_msg: >-
+          Set argocd_repository_url. For a private repository, also set
+          ARGOCD_GITHUB_USERNAME and ARGOCD_GITHUB_TOKEN.
+      no_log: "{{ argocd_repository_private | bool }}"
+
+    - name: Register repository and remove temporary credentials
+      block:
+        - name: Create repository Secret manifest
+          ansible.builtin.copy:
+            dest: "{{ argocd_repository_manifest }}"
+            mode: "0600"
+            content: |
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: {{ argocd_repository_name }}
+                namespace: {{ argocd_namespace }}
+                labels:
+                  argocd.argoproj.io/secret-type: repository
+              type: Opaque
+              stringData:
+                type: git
+                url: {{ argocd_repository_url | to_json }}
+              {% if argocd_repository_private | bool %}
+                username: {{ argocd_github_username | to_json }}
+                password: {{ argocd_github_token | to_json }}
+              {% endif %}
+          no_log: "{{ argocd_repository_private | bool }}"
+
+        - name: Apply repository Secret
+          ansible.builtin.command:
+            argv:
+              - kubectl
+              - --kubeconfig
+              - "{{ argocd_kubeconfig }}"
+              - apply
+              - --filename
+              - "{{ argocd_repository_manifest }}"
+          register: argocd_repository_apply
+          changed_when: "'unchanged' not in argocd_repository_apply.stdout"
+          no_log: "{{ argocd_repository_private | bool }}"
+
+      always:
+        - name: Remove temporary repository Secret manifest
+          ansible.builtin.file:
+            path: "{{ argocd_repository_manifest }}"
+            state: absent
+          no_log: "{{ argocd_repository_private | bool }}"

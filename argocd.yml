@@ -111,21 +111,6 @@
         'has been upgraded' in argocd_install.stdout or
         'has been installed' in argocd_install.stdout
 
-    - name: Wait until all Argo CD pods are ready
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - --kubeconfig
-          - "{{ argocd_kubeconfig }}"
-          - wait
-          - --for=condition=Ready
-          - pod
-          - --all
-          - --namespace
-          - "{{ argocd_namespace }}"
-          - "--timeout={{ argocd_wait_timeout }}"
-      changed_when: false
-
     - name: Create the homelab Argo CD Application manifest
       ansible.builtin.copy:
         dest: "{{ argocd_application_manifest }}"

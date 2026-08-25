@@ -1,0 +1,162 @@
+---
+- name: Deploy Argo CD to the Kubernetes control plane
+  hosts: kube_control_plane[0]
+  become: true
+  gather_facts: false
+
+  vars:
+    argocd_release_name: argocd
+    argocd_namespace: argocd
+    argocd_chart_ref: argo/argo-cd
+    argocd_chart_version: ""
+    argocd_repo_name: argo
+    argocd_repo_url: https://argoproj.github.io/argo-helm
+    argocd_kubeconfig: /etc/kubernetes/admin.conf
+    argocd_wait_timeout: 900s
+    argocd_server_service_type: NodePort
+
+    # kubeadm control-plane nodes are normally tainted. These values keep every
+    # Argo CD component on a control-plane node while tolerating that taint.
+    argocd_helm_values:
+      global:
+        nodeSelector:
+          node-role.kubernetes.io/control-plane: ""
+        tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+      server:
+        service:
+          type: "{{ argocd_server_service_type }}"
+
+    argocd_application_name: homelab
+    argocd_application_repo_url: git@github.com:seojelee9999/homelab-argocd.git
+    argocd_application_revision: HEAD
+    argocd_application_path: .
+    argocd_application_destination_namespace: default
+    argocd_repository_secret_name: homelab-github-repository
+    # Supply this from Ansible Vault or the controller's environment. Never
+    # commit the private key to this playbook.
+    argocd_repository_ssh_private_key: >-
+      {{ lookup('ansible.builtin.env', 'ARGOCD_GITHUB_SSH_PRIVATE_KEY') }}
+
+  pre_tasks:
+    - name: Check that the Kubernetes admin kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ argocd_kubeconfig }}"
+      register: argocd_kubeconfig_stat
+
+    - name: Verify deployment prerequisites
+      ansible.builtin.assert:
+        that:
+          - argocd_kubeconfig_stat.stat.exists
+        fail_msg: >-
+          {{ argocd_kubeconfig }} does not exist. Initialize the control plane
+          before deploying Argo CD.
+
+  tasks:
+    - name: Add the Argo Helm repository
+      kubernetes.core.helm_repository:
+        name: "{{ argocd_repo_name }}"
+        repo_url: "{{ argocd_repo_url }}"
+        force_update: true
+
+    - name: Create the Argo CD namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ argocd_namespace }}"
+
+    - name: Install or upgrade Argo CD with Helm
+      kubernetes.core.helm:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        name: "{{ argocd_release_name }}"
+        chart_ref: "{{ argocd_chart_ref }}"
+        chart_version: "{{ argocd_chart_version if argocd_chart_version | length > 0 else omit }}"
+        release_namespace: "{{ argocd_namespace }}"
+        create_namespace: false
+        release_values: "{{ argocd_helm_values }}"
+        update_repo_cache: true
+        wait: true
+        wait_timeout: "{{ argocd_wait_timeout }}"
+        atomic: true
+
+    - name: Verify the GitHub deploy key is available
+      ansible.builtin.assert:
+        that:
+          - argocd_repository_ssh_private_key | trim | length > 0
+        fail_msg: >-
+          Set ARGOCD_GITHUB_SSH_PRIVATE_KEY to the private deploy key, or
+          override argocd_repository_ssh_private_key with an Ansible Vault
+          variable.
+
+    - name: Register the private GitHub repository in Argo CD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ argocd_repository_secret_name }}"
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              argocd.argoproj.io/secret-type: repository
+          type: Opaque
+          stringData:
+            type: git
+            url: "{{ argocd_application_repo_url }}"
+            sshPrivateKey: "{{ argocd_repository_ssh_private_key }}"
+      no_log: true
+
+    - name: Create the homelab Argo CD application
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ argocd_application_name }}"
+            namespace: "{{ argocd_namespace }}"
+            finalizers:
+              - resources-finalizer.argocd.argoproj.io
+          spec:
+            project: default
+            source:
+              repoURL: "{{ argocd_application_repo_url }}"
+              targetRevision: "{{ argocd_application_revision }}"
+              path: "{{ argocd_application_path }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ argocd_application_destination_namespace }}"
+            syncPolicy:
+              automated:
+                enabled: true
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+
+    - name: Read the Argo CD server service
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        api_version: v1
+        kind: Service
+        name: "{{ argocd_release_name }}-server"
+        namespace: "{{ argocd_namespace }}"
+      register: argocd_server_service
+
+    - name: Show Argo CD connection information
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Service type: {{ argocd_server_service.resources[0].spec.type }}
+          - >-
+            Initial password: kubectl -n {{ argocd_namespace }} get secret
+            {{ argocd_release_name }}-initial-admin-secret
+            -o jsonpath='{.data.password}' | base64 -d; echo

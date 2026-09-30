@@ -1,0 +1,107 @@
+---
+# Run: ansible-playbook repair_root_rw.yml
+# Target workers only: ansible-playbook repair_root_rw.yml --limit kube_node
+- name: Repair read-only root filesystems on Kubernetes nodes
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+
+  pre_tasks:
+    # raw works even when Ansible cannot create temporary files on the root disk.
+    - name: Read current root mount options without remote temporary files
+      ansible.builtin.raw: findmnt -n -o OPTIONS /
+      register: root_options
+      changed_when: false
+      check_mode: false
+
+    - name: Require a normal run to bootstrap a read-only host
+      ansible.builtin.assert:
+        that:
+          - not (ansible_check_mode and 'ro' in root_options.stdout | trim | split(','))
+        fail_msg: "Root is read-only. Run without --check to remount it before using Ansible modules."
+
+    - name: Remount root read-write
+      ansible.builtin.raw: mount -o remount,rw /
+      when: "'ro' in root_options.stdout | trim | split(',')"
+      changed_when: true
+
+  tasks:
+    - name: Read root filesystem identity
+      ansible.builtin.command: findmnt --json -o UUID,FSTYPE,OPTIONS /
+      register: root_mount
+      changed_when: false
+      check_mode: false
+
+    - name: Store root filesystem identity
+      ansible.builtin.set_fact:
+        root_fs: "{{ (root_mount.stdout | from_json).filesystems[0] }}"
+
+    - name: Verify this is a writable ext4 root with a UUID
+      ansible.builtin.assert:
+        that:
+          - root_fs.fstype == 'ext4'
+          - root_fs.uuid | default('', true) | length > 0
+          - "'rw' in root_fs.options.split(',')"
+        fail_msg: "Expected the ext4 VM root disk with a UUID and rw mount; inspect this host manually."
+
+    - name: Read existing fstab
+      ansible.builtin.slurp:
+        src: /etc/fstab
+      register: root_fstab
+
+    - name: Find active or commented root entry
+      ansible.builtin.set_fact:
+        root_entries: >-
+          {{ (root_fstab.content | b64decode).splitlines()
+             | select('match', '^\s*#?\s*[^#\s]+\s+/\s+\S+\s+\S+.*$') | list }}
+
+    - name: Reject ambiguous root entries
+      ansible.builtin.assert:
+        that:
+          - root_entries | length <= 1
+        fail_msg: "Multiple root entries found in fstab. Resolve them before running this repair."
+
+    - name: Preserve existing root options and filesystem check settings
+      ansible.builtin.set_fact:
+        root_fields: >-
+          {{ (root_entries[0] | regex_replace('^\s*#\s*', '')).split()
+             if root_entries | length else ['UUID=' ~ root_fs.uuid, '/', 'ext4', 'defaults', '0', '1'] }}
+
+    - name: Persist writable root mount with this host's UUID
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*#?\s*[^#\s]+\s+/\s+\S+\s+\S+.*$'
+        line: "UUID={{ root_fs.uuid }} / ext4 {{ ((root_fields[3].split(',') | difference(['ro', 'rw'])) + ['rw']) | join(',') }} {{ root_fields[4] | default('0') }} {{ root_fields[5] | default('1') }}"
+        backup: true
+        validate: /usr/bin/findmnt --verify --tab-file %s
+      register: fstab_repair
+
+    - name: Reload systemd after fstab changes
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: fstab_repair.changed
+
+    # Start in dependency order; healthy services do not need a restart.
+    - name: Ensure containerd and kubelet are enabled and running
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - containerd
+        - kubelet
+
+    - name: Verify services remain active
+      ansible.builtin.command: systemctl is-active containerd kubelet
+      register: service_health
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: service_health.rc == 0
+      when: not ansible_check_mode
+
+    - name: Show repair result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: root is rw; fstab uses UUID={{ root_fs.uuid }}. Check kubectl get nodes and kubectl get pods -n argocd after recovery."

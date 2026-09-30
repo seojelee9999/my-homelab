@@ -1,0 +1,118 @@
+---
+- name: Prepare persistent storage and repository access for Mealnote
+  hosts: kube_control_plane[0]
+  become: true
+  gather_facts: false
+  vars:
+    diet_storage_host: worker-01
+    diet_storage_node: worker-01
+    diet_storage_path: /var/lib/mealnote
+    diet_repository_url: git@github.com:seojelee9999/diet-app.git
+    diet_repository_key: /etc/argocd/keys/diet-app
+    diet_kubeconfig: /etc/kubernetes/admin.conf
+  tasks:
+    - name: Check root filesystem on the storage host
+      ansible.builtin.command: findmnt -n -o OPTIONS /
+      delegate_to: "{{ diet_storage_host }}"
+      register: diet_mount_options
+      changed_when: false
+      check_mode: false
+    - name: Require a writable root filesystem
+      ansible.builtin.assert:
+        that:
+          - "'rw' in diet_mount_options.stdout.split(',')"
+        fail_msg: "Run repair_root_rw.yml before preparing diet-app storage."
+    - name: Prepare the dedicated SQLite data directory
+      ansible.builtin.file:
+        path: "{{ diet_storage_path }}"
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "0750"
+      delegate_to: "{{ diet_storage_host }}"
+    - name: Create the application namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ diet_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: diet-app
+            annotations:
+              argocd.argoproj.io/sync-options: Prune=false,Delete=false
+    - name: Reserve a retained local volume for the application
+      kubernetes.core.k8s:
+        kubeconfig: "{{ diet_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: diet-app-data
+          spec:
+            capacity:
+              storage: 1Gi
+            volumeMode: Filesystem
+            accessModes: [ReadWriteOnce]
+            storageClassName: ""
+            persistentVolumeReclaimPolicy: Retain
+            claimRef:
+              namespace: diet-app
+              name: diet-app-data
+            local:
+              path: "{{ diet_storage_path }}"
+            nodeAffinity:
+              required:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: In
+                        values: ["{{ diet_storage_node }}"]
+    - name: Create private repository key directory
+      ansible.builtin.file:
+        path: /etc/argocd/keys
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Generate a dedicated read-only deploy key
+      ansible.builtin.command:
+        argv: [ssh-keygen, -t, ed25519, -N, "", -C, argocd-diet-app, -f, "{{ diet_repository_key }}"]
+        creates: "{{ diet_repository_key }}"
+    - name: Read the private deploy key
+      ansible.builtin.slurp:
+        src: "{{ diet_repository_key }}"
+      register: diet_private_key
+      no_log: true
+      when: not ansible_check_mode
+    - name: Register the diet-app repository in Argo CD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ diet_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: diet-app-github-repository
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repository
+          type: Opaque
+          stringData:
+            type: git
+            url: "{{ diet_repository_url }}"
+            sshPrivateKey: "{{ diet_private_key.content | b64decode }}"
+      no_log: true
+      when: not ansible_check_mode
+    - name: Read the public deploy key
+      ansible.builtin.command: "cat {{ diet_repository_key }}.pub"
+      register: diet_public_key
+      changed_when: false
+      when: not ansible_check_mode
+    - name: Show the public key to register with GitHub
+      ansible.builtin.debug:
+        msg:
+          - "GitHub diet-app > Settings > Deploy keys > Add deploy key (read-only; leave Allow write access unchecked)."
+          - "{{ diet_public_key.stdout }}"
+      when: not ansible_check_mode

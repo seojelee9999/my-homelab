@@ -1,0 +1,41 @@
+---
+# Run: ansible-playbook disable_swap.yml
+# One node only: ansible-playbook disable_swap.yml --limit cp-01
+- name: Disable swap on Kubernetes nodes
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+
+  tasks:
+    - name: Read active swap devices
+      ansible.builtin.command: swapon --show --noheadings
+      register: active_swap
+      changed_when: false
+      check_mode: false
+
+    - name: Disable active swap
+      ansible.builtin.command: swapoff -a
+      when: active_swap.stdout | trim | length > 0
+      changed_when: true
+
+    - name: Disable swap persistently in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([ \t]*[^# \t\r\n]\S*[ \t]+\S+[ \t]+swap[ \t]+[^\r\n]*)$'
+        replace: '# \1'
+        backup: true
+      register: swap_fstab
+
+    - name: Reload systemd after updating fstab
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: swap_fstab.changed
+
+    - name: Verify no swap remains active
+      ansible.builtin.command: swapon --show --noheadings
+      register: remaining_swap
+      changed_when: false
+      failed_when: remaining_swap.rc != 0 or remaining_swap.stdout | trim | length > 0
+      when: not ansible_check_mode

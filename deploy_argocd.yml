@@ -1,8 +1,11 @@
 ---
-- name: Deploy Argo CD to the Kubernetes control plane
+- name: Deploy Argo CD on Kubernetes worker nodes
   hosts: kube_control_plane[0]
   become: true
   gather_facts: false
+
+  vars_files:
+    - deploy-vault.yaml
 
   vars:
     argocd_release_name: argocd
@@ -15,32 +18,45 @@
     argocd_wait_timeout: 900s
     argocd_server_service_type: NodePort
 
-    # kubeadm control-plane nodes are normally tainted. These values keep every
-    # Argo CD component on a control-plane node while tolerating that taint.
+    # Schedule every Argo CD component only on nodes labelled as workers.
     argocd_helm_values:
       global:
         nodeSelector:
-          node-role.kubernetes.io/control-plane: ""
-        tolerations:
-          - key: node-role.kubernetes.io/control-plane
-            operator: Exists
-            effect: NoSchedule
+          node-role.kubernetes.io/worker: ""
       server:
         service:
           type: "{{ argocd_server_service_type }}"
 
-    argocd_application_name: homelab
-    argocd_application_repo_url: git@github.com:seojelee9999/homelab-argocd.git
-    argocd_application_revision: HEAD
-    argocd_application_path: .
-    argocd_application_destination_namespace: default
-    argocd_repository_secret_name: homelab-github-repository
-    # Supply this from Ansible Vault or the controller's environment. Never
-    # commit the private key to this playbook.
-    argocd_repository_ssh_private_key: >-
-      {{ lookup('ansible.builtin.env', 'ARGOCD_GITHUB_SSH_PRIVATE_KEY') }}
+    argocd_application_name: homelab-root
+    argocd_application_repo_url: https://github.com/seojelee9999/homelab-argocd.git
+    argocd_application_revision: main
+    argocd_application_path: argocd
+    argocd_application_destination_namespace: "{{ argocd_namespace }}"
+    argocd_cluster_resources_application_name: cluster-resources
+    argocd_cluster_resources_path: cluster-resources
+    argocd_cluster_resources_destination_namespace: default
+    # Reuse the same PAT for the root repository and private application repos.
+    argocd_repository_secret_name: github-seojelee9999-repo-creds
+    argocd_repository_url_prefix: https://github.com/seojelee9999/
+    argocd_repository_username: seojelee9999
 
   pre_tasks:
+    - name: Verify vault_argocd_repository_pat is set in deploy-vault.yaml
+      ansible.builtin.assert:
+        that:
+          - vault_argocd_repository_pat | default('') | trim | length > 0
+        fail_msg: Define vault_argocd_repository_pat in deploy-vault.yaml using Ansible Vault.
+      no_log: true
+
+    - name: Install Python dependencies for Kubernetes modules
+      ansible.builtin.apt:
+        name:
+          - python3-kubernetes
+          - python3-yaml
+          - python3-jsonpatch
+        state: present
+        update_cache: true
+
     - name: Check that the Kubernetes admin kubeconfig exists
       ansible.builtin.stat:
         path: "{{ argocd_kubeconfig }}"
@@ -71,6 +87,19 @@
           metadata:
             name: "{{ argocd_namespace }}"
 
+    - name: Label Kubernetes worker nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: "{{ hostvars[item].ansible_hostname | default(item) }}"
+            labels:
+              node-role.kubernetes.io/worker: ""
+      loop: "{{ groups['kube_node'] }}"
+
     - name: Install or upgrade Argo CD with Helm
       kubernetes.core.helm:
         kubeconfig: "{{ argocd_kubeconfig }}"
@@ -85,16 +114,7 @@
         wait_timeout: "{{ argocd_wait_timeout }}"
         atomic: true
 
-    - name: Verify the GitHub deploy key is available
-      ansible.builtin.assert:
-        that:
-          - argocd_repository_ssh_private_key | trim | length > 0
-        fail_msg: >-
-          Set ARGOCD_GITHUB_SSH_PRIVATE_KEY to the private deploy key, or
-          override argocd_repository_ssh_private_key with an Ansible Vault
-          variable.
-
-    - name: Register the private GitHub repository in Argo CD
+    - name: Register shared GitHub PAT credentials in Argo CD
       kubernetes.core.k8s:
         kubeconfig: "{{ argocd_kubeconfig }}"
         state: present
@@ -105,15 +125,17 @@
             name: "{{ argocd_repository_secret_name }}"
             namespace: "{{ argocd_namespace }}"
             labels:
-              argocd.argoproj.io/secret-type: repository
+              argocd.argoproj.io/secret-type: repo-creds
           type: Opaque
           stringData:
             type: git
-            url: "{{ argocd_application_repo_url }}"
-            sshPrivateKey: "{{ argocd_repository_ssh_private_key }}"
+            url: "{{ argocd_repository_url_prefix }}"
+            username: "{{ argocd_repository_username }}"
+            password: "{{ vault_argocd_repository_pat }}"
       no_log: true
+      diff: false
 
-    - name: Create the homelab Argo CD application
+    - name: Create the homelab root Argo CD application
       kubernetes.core.k8s:
         kubeconfig: "{{ argocd_kubeconfig }}"
         state: present
@@ -123,8 +145,6 @@
           metadata:
             name: "{{ argocd_application_name }}"
             namespace: "{{ argocd_namespace }}"
-            finalizers:
-              - resources-finalizer.argocd.argoproj.io
           spec:
             project: default
             source:
@@ -134,6 +154,33 @@
             destination:
               server: https://kubernetes.default.svc
               namespace: "{{ argocd_application_destination_namespace }}"
+            syncPolicy:
+              automated:
+                enabled: true
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+
+    - name: Create the cluster resources Argo CD application
+      kubernetes.core.k8s:
+        kubeconfig: "{{ argocd_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: "{{ argocd_cluster_resources_application_name }}"
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            project: default
+            source:
+              repoURL: "{{ argocd_application_repo_url }}"
+              targetRevision: "{{ argocd_application_revision }}"
+              path: "{{ argocd_cluster_resources_path }}"
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ argocd_cluster_resources_destination_namespace }}"
             syncPolicy:
               automated:
                 enabled: true

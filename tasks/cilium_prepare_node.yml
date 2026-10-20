@@ -1,0 +1,126 @@
+---
+- name: Disable active swap
+  ansible.builtin.command: swapoff -a
+  when: ansible_facts.swaptotal_mb | int > 0
+  changed_when: true
+
+- name: Disable fstab swap on future boots
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(?!#)(.*\s+swap\s+.*)$'
+    replace: '# \1'
+
+- name: Persist required kernel modules
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/kubernetes.conf
+    mode: "0644"
+    content: |
+      overlay
+      br_netfilter
+
+- name: Load required kernel modules
+  ansible.builtin.command:
+    argv: [modprobe, "{{ item }}"]
+  loop: [overlay, br_netfilter]
+  changed_when: false
+
+- name: Persist network sysctl settings
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes-cri.conf
+    mode: "0644"
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+
+- name: Apply network sysctl settings
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-kubernetes-cri.conf
+  changed_when: false
+
+- name: Install runtime and prerequisites
+  ansible.builtin.apt:
+    name: [ca-certificates, containerd, curl, conntrack, socat, python3-yaml]
+    state: present
+    update_cache: true
+
+- name: Create runtime and repository directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/containerd
+    - /etc/apt/keyrings
+    - /etc/cni/net.d
+
+- name: Generate containerd defaults
+  ansible.builtin.command: containerd config default
+  register: cluster_containerd_default
+  changed_when: false
+
+- name: Require a runtime configuration with systemd cgroup support
+  ansible.builtin.assert:
+    that: "'SystemdCgroup' in cluster_containerd_default.stdout"
+
+- name: Manage containerd configuration for this dedicated Kubernetes node
+  ansible.builtin.copy:
+    dest: /etc/containerd/config.toml
+    content: "{{ cluster_containerd_default.stdout | replace('SystemdCgroup = false', 'SystemdCgroup = true') }}\n"
+    mode: "0644"
+    backup: true
+  notify: Restart Cilium cluster containerd
+
+- name: Enable containerd
+  ansible.builtin.systemd_service:
+    name: containerd
+    state: started
+    enabled: true
+
+- name: Apply containerd changes before using kubeadm
+  ansible.builtin.meta: flush_handlers
+
+- name: Download Kubernetes repository signing key
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/deb/Release.key"
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+
+- name: Select the Kubernetes minor-version repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    mode: "0644"
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor_version }}/deb/ /
+
+- name: Install identical pinned Kubernetes packages on every node
+  ansible.builtin.apt:
+    name:
+      - "kubeadm={{ kubernetes_package_version }}"
+      - "kubelet={{ kubernetes_package_version }}"
+      - "kubectl={{ kubernetes_package_version }}"
+    state: present
+    update_cache: true
+    allow_change_held_packages: true
+
+- name: Hold Kubernetes package versions
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubeadm, kubelet, kubectl]
+
+- name: Enable kubelet for kubeadm
+  ansible.builtin.systemd_service:
+    name: kubelet
+    enabled: true
+
+- name: Create private cluster configuration directory
+  ansible.builtin.file:
+    path: "{{ cluster_config_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Record ownership and immutable cluster settings for safe retries
+  ansible.builtin.copy:
+    dest: "{{ cluster_config_dir }}/identity.json"
+    content: "{{ cluster_expected_identity | to_nice_json }}\n"
+    mode: "0600"

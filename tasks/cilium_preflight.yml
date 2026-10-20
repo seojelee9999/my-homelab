@@ -1,0 +1,63 @@
+---
+- name: Require the complete main cluster and a single control plane
+  ansible.builtin.assert:
+    that:
+      - groups.get('kube_control_plane', []) | length == 1
+      - groups.get('kube_node', []) | length >= 1
+      - groups.get('k8s_cluster', []) | intersect(groups.get('cka_cluster', [])) | length == 0
+      - ansible_play_hosts_all | sort == groups['k8s_cluster'] | sort
+      - groups['k8s_cluster'] | sort == (groups['kube_control_plane'] + groups['kube_node']) | unique | sort
+    fail_msg: "Use the complete k8s_cluster (one control plane and workers); do not use --limit."
+  run_once: true
+
+- name: Check supported host platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version is version('22.04', '>=')
+      - ansible_facts.architecture in ['x86_64', 'aarch64']
+      - ansible_facts.kernel.split('-')[0] is version('5.10', '>=')
+      - ansible_host in ansible_facts.all_ipv4_addresses
+    fail_msg: "Requires Ubuntu >= 22.04, kernel >= 5.10, amd64/arm64, and ansible_host set to the node's LAN IPv4."
+
+- name: Check the root filesystem
+  ansible.builtin.command: findmnt -n -o OPTIONS /
+  register: cluster_root_mount
+  changed_when: false
+  check_mode: false
+
+- name: Require a writable root filesystem
+  ansible.builtin.assert:
+    that: "'rw' in cluster_root_mount.stdout.split(',')"
+    fail_msg: "Repair the root filesystem before rebuilding this node."
+
+- name: Check requested versions and configuration
+  ansible.builtin.assert:
+    that:
+      - kubernetes_version is match('^1\.(33|34|35|36)\.[0-9]+$')
+      - cilium_version is match('^1\.20\.[0-9]+$')
+      - cluster_api_port | int == 6443
+      - cilium_operator_replicas | int >= 1
+      - cilium_operator_replicas | int <= groups['k8s_cluster'] | length
+    fail_msg: "This workflow targets Cilium 1.20 and Kubernetes 1.33–1.36, using API port 6443."
+  run_once: true
+
+- name: Validate IPv4 networks against each other and the node LAN address
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import ipaddress, json, sys
+        pod, service = [ipaddress.IPv4Network(x) for x in sys.argv[1:3]]
+        assert 16 <= pod.prefixlen <= 24, 'Pod CIDR must be /16 through /24'
+        assert service.num_addresses >= 256, 'Service CIDR must be /24 or larger'
+        assert not pod.overlaps(service), 'Pod and Service CIDRs overlap'
+        for addr in json.loads(sys.argv[3]):
+            ip = ipaddress.IPv4Address(addr)
+            assert ip not in pod and ip not in service, f'CIDR overlaps host address {ip}'
+      - "{{ cluster_pod_cidr }}"
+      - "{{ cluster_service_cidr }}"
+      - "{{ [ansible_host] | to_json }}"
+  changed_when: false
+  check_mode: false

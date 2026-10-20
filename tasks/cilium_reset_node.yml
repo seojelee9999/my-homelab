@@ -1,0 +1,45 @@
+---
+# Keep this guard in the destructive task file too, including for --start-at-task.
+- name: Recheck destructive reset acknowledgement
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+      - cluster_reset_confirm == 'RESET-MAIN-CLUSTER'
+      - (cluster_backups_verified | bool) or (cluster_discard_existing_state | bool)
+
+- name: Reset kubeadm state including the local control-plane etcd member
+  ansible.builtin.command:
+    argv: [kubeadm, reset, --force, --cri-socket, "{{ cluster_cri_socket }}"]
+  changed_when: true
+
+- name: Stop kubelet until the new cluster is configured
+  ansible.builtin.systemd_service:
+    name: kubelet
+    state: stopped
+    enabled: false
+
+- name: Remove only Kubernetes CNI configuration and runtime state
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/cni/net.d
+    - /var/lib/cni
+    - /var/lib/calico
+    - /var/lib/cilium
+    - /run/flannel
+    - /run/cilium
+    - "{{ cluster_config_dir }}"
+
+# Reboot clears transient interfaces, routes, iptables and pinned BPF state.
+# Do not flush the host firewall: it may also carry SSH/Tailscale rules.
+- name: Reboot to clear old network dataplane state
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+    post_reboot_delay: 15
+
+- name: Report reset completion and preserved application storage
+  ansible.builtin.debug:
+    msg: >-
+      Reset complete. Application directories including /var/lib/mealnote were
+      not deleted. PV/PVC objects and cluster Secrets must be recreated separately.

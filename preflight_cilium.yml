@@ -1,0 +1,29 @@
+---
+- name: Inspect main cluster hosts before rebuilding with Cilium
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Run read-only host and configuration checks
+      ansible.builtin.import_tasks: tasks/cilium_preflight.yml
+
+    - name: Find current CNI configuration names
+      ansible.builtin.find:
+        paths: /etc/cni/net.d
+        patterns: '*.conf,*.conflist'
+      register: cluster_existing_cni
+
+    - name: Show the target configuration
+      ansible.builtin.debug:
+        msg:
+          node: "{{ inventory_hostname }} ({{ ansible_host }})"
+          cni_files: "{{ cluster_existing_cni.files | map(attribute='path') | list }}"
+          kubernetes: "{{ kubernetes_version }}"
+          cilium: "{{ cilium_version }}"
+          api: "{{ cluster_api_address }}:{{ cluster_api_port }}"
+          pod_cidr: "{{ cluster_pod_cidr }}"
+          service_cidr: "{{ cluster_service_cidr }}"
+          kube_proxy_replacement: "{{ cilium_kube_proxy_replacement }}"

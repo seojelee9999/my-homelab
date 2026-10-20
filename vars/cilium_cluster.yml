@@ -1,0 +1,32 @@
+---
+# Only the main k8s_cluster inventory group is used. CKA nodes are excluded.
+kubernetes_version: "1.35.9"
+kubernetes_package_version: "{{ kubernetes_version }}-1.1"
+kubernetes_minor_version: "v{{ kubernetes_version.split('.')[0:2] | join('.') }}"
+cilium_version: "1.20.3"
+helm_version: "v3.19.0"
+
+cluster_name: homelab
+cluster_control_plane: "{{ groups['kube_control_plane'][0] }}"
+cluster_api_address: "{{ hostvars[cluster_control_plane].ansible_host }}"
+cluster_api_port: 6443
+# Check these against LAN, VPN, Docker, and other routed networks before use.
+cluster_pod_cidr: "10.244.0.0/16"
+cluster_service_cidr: "10.96.0.0/12"
+cluster_dns_domain: cluster.local
+cluster_cri_socket: unix:///run/containerd/containerd.sock
+cluster_kubeconfig: /etc/kubernetes/admin.conf
+cluster_config_dir: /etc/kubernetes/ansible-cilium
+
+# CNI replacement alone does not require replacing kube-proxy.
+# Choose this before creating the cluster; changing it later is not supported here.
+cilium_kube_proxy_replacement: false
+cilium_hubble_enabled: true
+cilium_operator_replicas: 1
+
+# Choose either verified backups or intentional disposal of existing cluster state.
+# Neither option deletes application directories such as /var/lib/mealnote.
+# Neither reset nor bootstrap backs up application data or cluster Secrets.
+cluster_reset_confirm: ""
+cluster_backups_verified: false
+cluster_discard_existing_state: false

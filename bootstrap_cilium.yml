@@ -1,0 +1,245 @@
+---
+- name: Validate all nodes before changing any node
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Require a real run or the separate read-only preflight playbook
+      ansible.builtin.assert:
+        that: not ansible_check_mode
+        fail_msg: "Use preflight_cilium.yml for read-only checks; bootstrap does not support --check."
+
+    - name: Validate host and network settings
+      ansible.builtin.import_tasks: tasks/cilium_preflight.yml
+
+    - name: Define the immutable identity of this installation
+      ansible.builtin.set_fact:
+        cluster_expected_identity:
+          cluster_name: "{{ cluster_name }}"
+          node_name: "{{ inventory_hostname }}"
+          node_ip: "{{ ansible_host }}"
+          api_address: "{{ cluster_api_address }}"
+          api_port: "{{ cluster_api_port | int }}"
+          kubernetes_version: "{{ kubernetes_version }}"
+          cilium_version: "{{ cilium_version }}"
+          pod_cidr: "{{ cluster_pod_cidr }}"
+          service_cidr: "{{ cluster_service_cidr }}"
+          dns_domain: "{{ cluster_dns_domain }}"
+          cri_socket: "{{ cluster_cri_socket }}"
+          kube_proxy_replacement: "{{ cilium_kube_proxy_replacement | bool }}"
+
+    - name: Inspect existing Kubernetes and CNI state
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/kubernetes/kubelet.conf
+        - /etc/kubernetes/admin.conf
+        - /var/lib/etcd/member
+        - "{{ cluster_config_dir }}/identity.json"
+      register: cluster_existing_state
+
+    - name: Find existing CNI configuration
+      ansible.builtin.find:
+        paths: /etc/cni/net.d
+        file_type: file
+        patterns: ['*.conf', '*.conflist', '*.json']
+      register: cluster_existing_cni
+
+    - name: Refuse to overwrite an unmanaged cluster
+      ansible.builtin.assert:
+        that:
+          - >-
+            cluster_existing_state.results[3].stat.exists or
+            (not cluster_existing_state.results[0].stat.exists and
+             not cluster_existing_state.results[1].stat.exists and
+             not cluster_existing_state.results[2].stat.exists and
+             cluster_existing_cni.matched == 0)
+        fail_msg: "Existing cluster/CNI detected. Back up and run reset_k8s.yml first. This is not a live migration playbook."
+
+    - name: Read the previous installation identity
+      ansible.builtin.slurp:
+        src: "{{ cluster_config_dir }}/identity.json"
+      register: cluster_previous_identity
+      when: cluster_existing_state.results[3].stat.exists
+
+    - name: Refuse implicit version upgrades or network reconfiguration
+      ansible.builtin.assert:
+        that:
+          - cluster_previous_identity.content | b64decode | from_json == cluster_expected_identity
+        fail_msg: "Cluster settings changed. Use a planned upgrade/migration or reset; this workflow only retries the same installation."
+      when: cluster_existing_state.results[3].stat.exists
+
+- name: Prepare validated nodes for kubeadm
+  hosts: k8s_cluster
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Configure runtime and Kubernetes packages
+      ansible.builtin.import_tasks: tasks/cilium_prepare_node.yml
+  handlers:
+    - name: Restart Cilium cluster containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+
+- name: Initialize the control plane
+  hosts: kube_control_plane
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Write kubeadm init configuration
+      ansible.builtin.template:
+        src: templates/kubeadm-init.yml.j2
+        dest: "{{ cluster_config_dir }}/init.yml"
+        mode: "0600"
+
+    - name: Initialize Kubernetes once
+      ansible.builtin.command:
+        argv: "{{ ['kubeadm', 'init', '--config', cluster_config_dir ~ '/init.yml'] + (['--skip-phases=addon/kube-proxy'] if cilium_kube_proxy_replacement | bool else []) }}"
+        creates: /etc/kubernetes/admin.conf
+      no_log: true
+
+    - name: Wait for the authenticated API readiness endpoint
+      ansible.builtin.command:
+        argv: [kubectl, "--kubeconfig={{ cluster_kubeconfig }}", get, --raw=/readyz]
+      register: cluster_api_ready
+      until: cluster_api_ready.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Create a short-lived join token only if workers still need joining
+      ansible.builtin.command: kubeadm token create --ttl 30m --print-join-command
+      register: cluster_join_command
+      no_log: true
+      changed_when: true
+      when: >-
+        groups['kube_node'] | map('extract', hostvars, 'cluster_existing_state') |
+        map(attribute='results') | map('first') | selectattr('stat.exists', 'equalto', false) | list | length > 0
+
+    - name: Parse the kubeadm-generated join command
+      ansible.builtin.set_fact:
+        cluster_join_parts: "{{ cluster_join_command.stdout.split() }}"
+      when: not cluster_join_command.skipped | default(false)
+      no_log: true
+
+    - name: Validate join command structure before using its credentials
+      ansible.builtin.assert:
+        that:
+          - cluster_join_parts | length == 7
+          - cluster_join_parts[0:2] == ['kubeadm', 'join']
+          - cluster_join_parts[3] == '--token'
+          - cluster_join_parts[5] == '--discovery-token-ca-cert-hash'
+      when: not cluster_join_command.skipped | default(false)
+      no_log: true
+
+- name: Join workers with explicit LAN node addresses
+  hosts: kube_node
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Join new workers and remove the temporary join credentials
+      when: not cluster_existing_state.results[0].stat.exists
+      block:
+        - name: Write temporary kubeadm join configuration
+          ansible.builtin.template:
+            src: templates/kubeadm-join.yml.j2
+            dest: "{{ cluster_config_dir }}/join.yml"
+            mode: "0600"
+          no_log: true
+
+        - name: Join this worker to the control plane
+          ansible.builtin.command:
+            argv: [kubeadm, join, --config, "{{ cluster_config_dir }}/join.yml"]
+            creates: /etc/kubernetes/kubelet.conf
+          no_log: true
+      always:
+        - name: Remove temporary join credentials
+          ansible.builtin.file:
+            path: "{{ cluster_config_dir }}/join.yml"
+            state: absent
+
+- name: Install Cilium and verify cluster readiness
+  hosts: kube_control_plane
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Select Helm architecture and isolated installation directory
+      ansible.builtin.set_fact:
+        cluster_helm_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts.architecture] }}"
+        cluster_helm_dir: "/usr/local/lib/ansible-helm/{{ helm_version }}"
+
+    - name: Create Helm installation directory
+      ansible.builtin.file:
+        path: "{{ cluster_helm_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download pinned Helm archive with upstream SHA256 verification
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ cluster_helm_arch }}.tar.gz"
+        checksum: "sha256:https://get.helm.sh/helm-{{ helm_version }}-linux-{{ cluster_helm_arch }}.tar.gz.sha256sum"
+        dest: "{{ cluster_helm_dir }}/helm.tar.gz"
+        mode: "0644"
+
+    - name: Extract the verified Helm binary
+      ansible.builtin.unarchive:
+        src: "{{ cluster_helm_dir }}/helm.tar.gz"
+        dest: "{{ cluster_helm_dir }}"
+        remote_src: true
+        creates: "{{ cluster_helm_dir }}/linux-{{ cluster_helm_arch }}/helm"
+
+    - name: Save the Cilium Helm values for inspection
+      ansible.builtin.template:
+        src: templates/cilium-values.yml.j2
+        dest: "{{ cluster_config_dir }}/cilium-values.yml"
+        mode: "0600"
+
+    - name: Install the pinned Cilium Helm release
+      kubernetes.core.helm:
+        binary_path: "{{ cluster_helm_dir }}/linux-{{ cluster_helm_arch }}/helm"
+        kubeconfig: "{{ cluster_kubeconfig }}"
+        name: cilium
+        chart_ref: "https://helm.cilium.io/cilium-{{ cilium_version }}.tgz"
+        release_namespace: kube-system
+        release_values: "{{ lookup('ansible.builtin.template', 'templates/cilium-values.yml.j2') | from_yaml }}"
+        reset_values: true
+        wait: true
+        timeout: 10m0s
+
+    - name: Wait for every inventory node to be registered and Ready
+      ansible.builtin.command:
+        argv: [kubectl, "--kubeconfig={{ cluster_kubeconfig }}", wait, --for=condition=Ready, "node/{{ item }}", --timeout=300s]
+      loop: "{{ groups['k8s_cluster'] }}"
+      changed_when: false
+
+    - name: Verify network and DNS workloads have rolled out
+      ansible.builtin.command:
+        argv: [kubectl, "--kubeconfig={{ cluster_kubeconfig }}", -n, kube-system, rollout, status, "{{ item }}", --timeout=300s]
+      loop: "{{ ['daemonset/cilium', 'deployment/cilium-operator', 'deployment/coredns'] + (['daemonset/kube-proxy'] if not cilium_kube_proxy_replacement | bool else []) + (['deployment/hubble-relay', 'deployment/hubble-ui'] if cilium_hubble_enabled | bool else []) }}"
+      changed_when: false
+
+    - name: Show final node addresses and versions
+      ansible.builtin.command:
+        argv: [kubectl, "--kubeconfig={{ cluster_kubeconfig }}", get, nodes, -o, wide]
+      changed_when: false
+      register: cluster_final_nodes
+
+    - name: Report cluster readiness
+      ansible.builtin.debug:
+        msg: "{{ cluster_final_nodes.stdout_lines }}"

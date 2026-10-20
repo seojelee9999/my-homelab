@@ -1,0 +1,50 @@
+---
+- name: Validate the entire cluster before any destructive action
+  hosts: k8s_cluster
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Require explicit reset and a backup or disposal acknowledgement
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - cluster_reset_confirm == 'RESET-MAIN-CLUSTER'
+          - (cluster_backups_verified | bool) or (cluster_discard_existing_state | bool)
+        fail_msg: >-
+          Destructive reset requires -e cluster_reset_confirm=RESET-MAIN-CLUSTER
+          and either -e cluster_backups_verified=true after verifying off-node backups
+          or -e cluster_discard_existing_state=true to intentionally discard cluster state.
+          Check mode is unsupported; use preflight_cilium.yml for read-only checks.
+
+    - name: Validate all targets before resetting any node
+      ansible.builtin.import_tasks: tasks/cilium_preflight.yml
+
+    - name: Require kubeadm to be available for cleanup
+      ansible.builtin.command: kubeadm version -o short
+      changed_when: false
+
+- name: Reset workers before the control plane
+  hosts: kube_node
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Reset Kubernetes and old CNI state
+      ansible.builtin.import_tasks: tasks/cilium_reset_node.yml
+
+- name: Reset the control plane last
+  hosts: kube_control_plane
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars/cilium_cluster.yml
+  tasks:
+    - name: Reset Kubernetes and old CNI state
+      ansible.builtin.import_tasks: tasks/cilium_reset_node.yml

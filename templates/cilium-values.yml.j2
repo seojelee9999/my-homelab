@@ -1,0 +1,15 @@
+kubeProxyReplacement: {{ cilium_kube_proxy_replacement | bool | lower }}
+k8sServiceHost: {{ cluster_api_address | to_json }}
+k8sServicePort: {{ cluster_api_port }}
+routingMode: tunnel
+tunnelProtocol: vxlan
+ipam:
+  mode: kubernetes
+operator:
+  replicas: {{ cilium_operator_replicas }}
+hubble:
+  enabled: {{ cilium_hubble_enabled | bool | lower }}
+  relay:
+    enabled: {{ cilium_hubble_enabled | bool | lower }}
+  ui:
+    enabled: {{ cilium_hubble_enabled | bool | lower }}

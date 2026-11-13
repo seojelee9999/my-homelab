@@ -1,0 +1,171 @@
+---
+- name: Deploy and verify a test application through ingress-nginx
+  hosts: kube_control_plane
+  become: true
+  gather_facts: false
+
+  vars:
+    test_ingress_namespace: test-ingress
+    test_ingress_name: test-ingress
+    test_ingress_host: test.example.local
+    test_ingress_kubeconfig: /etc/kubernetes/admin.conf
+    test_ingress_manifest: /tmp/test-ingress.yml
+    test_ingress_timeout: 180s
+
+  tasks:
+    - name: Check that the Kubernetes admin kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ test_ingress_kubeconfig }}"
+      register: test_ingress_kubeconfig_stat
+
+    - name: Stop when the Kubernetes control plane is not initialized
+      ansible.builtin.assert:
+        that:
+          - test_ingress_kubeconfig_stat.stat.exists
+        fail_msg: >-
+          {{ test_ingress_kubeconfig }} does not exist. Initialize the
+          Kubernetes control plane first.
+
+    - name: Write the test application manifest
+      ansible.builtin.copy:
+        dest: "{{ test_ingress_manifest }}"
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ test_ingress_namespace }}
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: {{ test_ingress_name }}
+            namespace: {{ test_ingress_namespace }}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: {{ test_ingress_name }}
+            template:
+              metadata:
+                labels:
+                  app: {{ test_ingress_name }}
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:1.27-alpine
+                    ports:
+                      - name: http
+                        containerPort: 80
+                    readinessProbe:
+                      httpGet:
+                        path: /
+                        port: http
+                    resources:
+                      requests:
+                        cpu: 10m
+                        memory: 16Mi
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ test_ingress_name }}
+            namespace: {{ test_ingress_namespace }}
+          spec:
+            type: ClusterIP
+            selector:
+              app: {{ test_ingress_name }}
+            ports:
+              - name: http
+                port: 80
+                targetPort: http
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: {{ test_ingress_name }}
+            namespace: {{ test_ingress_namespace }}
+          spec:
+            ingressClassName: nginx
+            rules:
+              - host: {{ test_ingress_host }}
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: {{ test_ingress_name }}
+                          port:
+                            number: 80
+
+    - name: Apply the test application manifest
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ test_ingress_kubeconfig }}"
+          - apply
+          - --filename
+          - "{{ test_ingress_manifest }}"
+      register: test_ingress_apply
+      changed_when: >-
+        ' created' in test_ingress_apply.stdout or
+        ' configured' in test_ingress_apply.stdout
+
+    - name: Wait for the test application rollout
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ test_ingress_kubeconfig }}"
+          - --namespace
+          - "{{ test_ingress_namespace }}"
+          - rollout
+          - status
+          - "deployment/{{ test_ingress_name }}"
+          - "--timeout={{ test_ingress_timeout }}"
+      changed_when: false
+
+    - name: Read the ingress-nginx HTTP NodePort
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ test_ingress_kubeconfig }}"
+          - --namespace
+          - ingress-nginx
+          - get
+          - service
+          - ingress-nginx-controller
+          - --output=jsonpath={.spec.ports[?(@.name=="http")].nodePort}
+      register: test_ingress_http_nodeport
+      changed_when: false
+      failed_when: >-
+        test_ingress_http_nodeport.rc != 0 or
+        test_ingress_http_nodeport.stdout | trim | length == 0
+
+    - name: Verify the complete NodePort to Pod ingress path
+      ansible.builtin.uri:
+        url: >-
+          http://{{ ansible_host }}:{{ test_ingress_http_nodeport.stdout | trim }}/
+        headers:
+          Host: "{{ test_ingress_host }}"
+        return_content: true
+        status_code: 200
+      register: test_ingress_response
+      retries: 12
+      delay: 5
+      until: test_ingress_response.status == 200
+
+    - name: Show the test result
+      ansible.builtin.debug:
+        msg:
+          - "Ingress test passed (HTTP {{ test_ingress_response.status }})."
+          - >-
+            Test URL: http://{{ ansible_host }}:
+            {{- test_ingress_http_nodeport.stdout | trim }}/
+          - "Host header: {{ test_ingress_host }}"

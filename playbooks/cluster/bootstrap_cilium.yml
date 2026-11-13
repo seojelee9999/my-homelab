@@ -10,7 +10,7 @@
     - name: Require a real run or the separate read-only preflight playbook
       ansible.builtin.assert:
         that: not ansible_check_mode
-        fail_msg: "Use preflight_cilium.yml for read-only checks; bootstrap does not support --check."
+        fail_msg: "Use playbooks/cluster/preflight_cilium.yml for read-only checks; bootstrap does not support --check."
 
     - name: Validate host and network settings
       ansible.builtin.import_tasks: tasks/cilium_preflight.yml
@@ -57,7 +57,7 @@
              not cluster_existing_state.results[1].stat.exists and
              not cluster_existing_state.results[2].stat.exists and
              cluster_existing_cni.matched == 0)
-        fail_msg: "Existing cluster/CNI detected. Back up and run reset_k8s.yml first. This is not a live migration playbook."
+        fail_msg: "Existing cluster/CNI detected. Back up and run playbooks/cluster/reset_k8s.yml first. This is not a live migration playbook."
 
     - name: Read the previous installation identity
       ansible.builtin.slurp:

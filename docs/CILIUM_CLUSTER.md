@@ -9,10 +9,10 @@ amd64/arm64를 지원한다. 노드는 Kubernetes 전용 서버라고 가정한�
 
 | 파일 | 역할 |
 | --- | --- |
-| `vars/cilium_cluster.yml` | 버전, API 주소, Pod/Service CIDR, Cilium 옵션 |
-| `preflight_cilium.yml` | OS·커널·주소·루트 파일시스템 확인, 현재 CNI 파일명 출력 |
-| `reset_k8s.yml` | 명시적으로 허용했을 때만 기존 클러스터 초기화 및 노드 재부팅 |
-| `bootstrap_cilium.yml` | 런타임 준비 → kubeadm init → 워커 join → Cilium → 준비 상태 확인 |
+| `playbooks/cluster/vars/cilium_cluster.yml` | 버전, API 주소, Pod/Service CIDR, Cilium 옵션 |
+| `playbooks/cluster/preflight_cilium.yml` | OS·커널·주소·루트 파일시스템 확인, 현재 CNI 파일명 출력 |
+| `playbooks/cluster/reset_k8s.yml` | 명시적으로 허용했을 때만 기존 클러스터 초기화 및 노드 재부팅 |
+| `playbooks/cluster/bootstrap_cilium.yml` | 런타임 준비 → kubeadm init → 워커 join → Cilium → 준비 상태 확인 |
 
 기본값은 Kubernetes **1.35.9**, Cilium **1.20.3**, Helm **3.19.0**이다.
 Kubernetes 패키지는 정확한 버전으로 설치하고 hold한다. Cilium은 VXLAN과
@@ -32,7 +32,7 @@ kubelet의 node-ip는 인벤토리 LAN 주소를 사용한다.
 이 경우 etcd/리소스 백업은 필수가 아니다. Git에 없는 Secret은 다시 등록해야 하며,
 DB의 기존 내용은 Argo CD가 복원하지 않는다. 이 옵션도 앱 데이터 디렉터리를 지우지는 않는다.
 
-1. `vars/cilium_cluster.yml`을 확인한다. Pod/Service CIDR은 LAN, VPN,
+1. `playbooks/cluster/vars/cilium_cluster.yml`을 확인한다. Pod/Service CIDR은 LAN, VPN,
    Docker, 다른 클러스터 및 라우팅되는 네트워크와 겹치면 안 된다.
    자동 검사는 두 CIDR 및 노드 LAN IP만 비교하며, 모든 라우팅 대역을 검증하지 않는다.
 2. 애플리케이션 쓰기와 Argo CD 자동 동기화를 중지하고 복구할 자료를 백업한다.
@@ -62,18 +62,18 @@ DB의 기존 내용은 Argo CD가 복원하지 않는다. 이 옵션도 앱 데�
 ansible-galaxy collection install -r requirements.yml
 
 # 서버 변경 없이 사전 점검
-ansible-playbook preflight_cilium.yml
+ansible-playbook playbooks/cluster/preflight_cilium.yml
 
 # 문법만 확인 (서버에 접속하지 않음)
-ansible-playbook --syntax-check reset_k8s.yml
-ansible-playbook --syntax-check bootstrap_cilium.yml
+ansible-playbook --syntax-check playbooks/cluster/reset_k8s.yml
+ansible-playbook --syntax-check playbooks/cluster/bootstrap_cilium.yml
 ```
 
 기존 클러스터가 있을 때만 다음 초기화를 실행한다. 이 시점부터 서비스가 중단된다.
 워크로드와 Kubernetes API 객체, 로컬 etcd가 삭제되며 노드가 순차 재부팅된다.
 
 ```bash
-ansible-playbook reset_k8s.yml \
+ansible-playbook playbooks/cluster/reset_k8s.yml \
   -e cluster_reset_confirm=RESET-MAIN-CLUSTER \
   -e cluster_backups_verified=true
 ```
@@ -81,7 +81,7 @@ ansible-playbook reset_k8s.yml \
 기존 클러스터 상태를 버리고 재배포한다면 위 명령 대신 다음을 실행한다.
 
 ```bash
-ansible-playbook reset_k8s.yml \
+ansible-playbook playbooks/cluster/reset_k8s.yml \
   -e cluster_reset_confirm=RESET-MAIN-CLUSTER \
   -e cluster_discard_existing_state=true
 ```
@@ -93,24 +93,24 @@ OS, SSH 키, Tailscale 설정은 초기화 대상이 아니다.
 
 ```bash
 # 새 클러스터 설치; reset을 자동 호출하지 않음
-ansible-playbook bootstrap_cilium.yml
+ansible-playbook playbooks/cluster/bootstrap_cilium.yml
 ```
 
 신규 서버라면 reset 없이 bootstrap만 실행한다. 메인 클러스터의 노드 준비와
-설치는 `bootstrap_cilium.yml`로 실행하며 swap 비활성화도 이 과정에 포함된다.
+설치는 `playbooks/cluster/bootstrap_cilium.yml`로 실행하며 swap 비활성화도 이 과정에 포함된다.
 컨테이너 런타임은 배포판의 containerd를 사용하며 설정을 기본값 + systemd cgroup으로
 관리한다. 기존 containerd 설정 파일은 Ansible backup으로 보관하지만 사용자 정의
 registry mirror, 인증, runtime 설정은 자동 병합하지 않는다. 그런 설정이 필요한
-환경에서는 `tasks/cilium_prepare_node.yml`을 먼저 조정한다.
+환경에서는 `playbooks/cluster/tasks/cilium_prepare_node.yml`을 먼저 조정한다.
 
 `--limit`, `--start-at-task`, 태그로 단계 건너뛰기는 지원하지 않는다.
 전체 인벤토리를 대상으로 실행해야 모든 노드를 확인한 후 변경을 시작한다.
-reset/bootstrap의 `--check`는 지원하지 않으며, `preflight_cilium.yml`을 사용한다.
+reset/bootstrap의 `--check`는 지원하지 않으며, `playbooks/cluster/preflight_cilium.yml`을 사용한다.
 fstab 이외의 zram/swap 서비스가 있다면 별도로 비활성화해야 한다.
 
 ## 선택: kube-proxy 대체
 
-처음 구축하기 **전에** `vars/cilium_cluster.yml`을 다음과 같이 변경한다.
+처음 구축하기 **전에** `playbooks/cluster/vars/cilium_cluster.yml`을 다음과 같이 변경한다.
 
 ```yaml
 cilium_kube_proxy_replacement: true
@@ -152,21 +152,21 @@ ssh -L 12000:127.0.0.1:12000 ubuntu@192.168.55.10
 ```
 
 통신 검증 후 스토리지/PV/PVC와 필요한 인증정보를 복원하고 Argo CD 및 앱을 배포한다.
-기존 `deploy_argocd.yml`은 Argo CD 설치, `deploy-vault.yaml`의 GitHub PAT 등록,
+기존 `playbooks/apps/deploy_argocd.yml`은 Argo CD 설치, `vault/deploy-vault.yaml`의 GitHub PAT 등록,
 `homelab-root` 및 `cluster-resources` Application 등록과 자동 동기화 설정까지 수행한다.
 따라서 이 두 Application이 참조하는 Git 매니페스트는 다시 배포할 수 있다.
-이 플레이북은 PATH에 Helm이 있어야 하므로 필요하면 기존 `helm.yml`을 먼저 실행한다.
+이 플레이북은 PATH에 Helm이 있어야 하므로 필요하면 기존 `playbooks/apps/helm.yml`을 먼저 실행한다.
 Ansible Vault로 암호화한 파일은 기존 실행 방식에 맞춰 `--ask-vault-pass` 등을 사용한다.
 
 ```bash
-ansible-playbook helm.yml
-ansible-playbook deploy_argocd.yml --ask-vault-pass
+ansible-playbook playbooks/apps/helm.yml
+ansible-playbook playbooks/apps/deploy_argocd.yml --ask-vault-pass
 ```
 
 Argo CD 자체는 DB 내용이나 Git 외부의 Secret을 복원하지 않는다. GHCR 이미지 pull
-Secret은 `set_ghcr_secret.yaml`로 재등록하고, Git에서 참조하는 앱의 선행조건을 갖춘다.
-이 플레이북은 `ghcr-pat-vault.yaml`의 인증정보를 사용한다.
-기존 `prepare_diet_gitops.yml`은 보존된 `/var/lib/mealnote`에 PV를 다시 연결하는 데
+Secret은 `playbooks/operations/set_ghcr_secret.yaml`로 재등록하고, Git에서 참조하는 앱의 선행조건을 갖춘다.
+이 플레이북은 `vault/ghcr-pat-vault.yaml`의 인증정보를 사용한다.
+기존 `playbooks/apps/prepare_diet_gitops.yml`은 보존된 `/var/lib/mealnote`에 PV를 다시 연결하는 데
 사용할 수 있으나, 먼저 Argo CD와 저장소 접근 등 해당 플레이북의 선행조건을 갖춘다.
 데이터 복구 완료 전에는 앱의 쓰기를 재개하지 않는다. 자동 앱 복구는 이 범위에 포함하지 않는다.
 

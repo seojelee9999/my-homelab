@@ -1,6 +1,6 @@
 ---
-# Run: ansible-playbook repair_root_rw.yml
-# Target workers only: ansible-playbook repair_root_rw.yml --limit kube_node
+# Run: ansible-playbook playbooks/operations/repair_root_rw.yml
+# Target workers only: ansible-playbook playbooks/operations/repair_root_rw.yml --limit kube_node
 - name: Repair read-only root filesystems on Kubernetes nodes
   hosts: k8s_cluster
   become: true

@@ -17,7 +17,7 @@
           Destructive reset requires -e cluster_reset_confirm=RESET-MAIN-CLUSTER
           and either -e cluster_backups_verified=true after verifying off-node backups
           or -e cluster_discard_existing_state=true to intentionally discard cluster state.
-          Check mode is unsupported; use preflight_cilium.yml for read-only checks.
+          Check mode is unsupported; use playbooks/cluster/preflight_cilium.yml for read-only checks.
 
     - name: Validate all targets before resetting any node
       ansible.builtin.import_tasks: tasks/cilium_preflight.yml

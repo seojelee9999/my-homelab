@@ -5,7 +5,7 @@
   gather_facts: false
 
   vars_files:
-    - deploy-vault.yaml
+    - "{{ playbook_dir }}/../../vault/deploy-vault.yaml"
 
   vars:
     argocd_release_name: argocd
@@ -41,11 +41,11 @@
     argocd_repository_username: seojelee9999
 
   pre_tasks:
-    - name: Verify vault_argocd_repository_pat is set in deploy-vault.yaml
+    - name: Verify vault_argocd_repository_pat is set in vault/deploy-vault.yaml
       ansible.builtin.assert:
         that:
           - vault_argocd_repository_pat | default('') | trim | length > 0
-        fail_msg: Define vault_argocd_repository_pat in deploy-vault.yaml using Ansible Vault.
+        fail_msg: Define vault_argocd_repository_pat in vault/deploy-vault.yaml using Ansible Vault.
       no_log: true
 
     - name: Install Python dependencies for Kubernetes modules

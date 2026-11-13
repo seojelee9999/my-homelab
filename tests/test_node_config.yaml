@@ -1,0 +1,13 @@
+---
+
+- name: check k8s cluster health
+  hosts: k8s_cluster
+  become: false
+  gather_facts: true
+  tasks:
+    - name: check root fileSystem
+      ansible.builtin.command: df -h /
+      register: root_fs
+      changed_when: false
+    
+    

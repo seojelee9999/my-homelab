@@ -46,7 +46,7 @@
       ansible.builtin.assert:
         that:
           - ingress_nginx_helm_version.rc == 0
-        fail_msg: "Helm is required. Run 'ansible-playbook helm.yml' first."
+        fail_msg: "Helm is required. Run 'ansible-playbook playbooks/apps/helm.yml' first."
 
     - name: Add or update the ingress-nginx Helm repository
       ansible.builtin.command:
